@@ -27,7 +27,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 ROOT = Path.cwd().resolve()
-TOKEN = secrets.token_urlsafe(18)
+TOKEN = ""  # set in main()
 
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_GREP_MATCHES = 500
@@ -1023,7 +1023,12 @@ def main() -> None:
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=0,
                     help="default: random free port in 8000-8999")
+    ap.add_argument("--token", default=None,
+                    help="auth token (default: $FB_TOKEN, else random)")
     args = ap.parse_args()
+
+    global TOKEN
+    TOKEN = args.token or os.environ.get("FB_TOKEN") or secrets.token_urlsafe(18)
 
     httpd = bind_server(args.host, args.port)
     port = httpd.server_address[1]

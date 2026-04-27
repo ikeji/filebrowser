@@ -27,8 +27,15 @@ fb
 ### オプション
 
 ```
---host HOST   bind address (default: 0.0.0.0)
---port PORT   default: 8000-8999 からランダムに空きを探す
+--host HOST    bind address (default: 0.0.0.0)
+--port PORT    default: 8000-8999 からランダムに空きを探す
+--token TOKEN  認証トークン (default: $FB_TOKEN、無ければランダム生成)
+```
+
+トークンを固定したい場合（再起動しても同じ URL を使い続けたい等）は環境変数で:
+
+```sh
+FB_TOKEN=mysecret fb
 ```
 
 ## 機能
