@@ -42,6 +42,7 @@ FB_TOKEN=mysecret fb
 
 - ファイルツリー（lazy 展開、`.git` `node_modules` などは除外）
 - ビューア: シンタックスハイライト、行番号、画面幅で折り返し
+- 画像プレビュー (png/jpg/gif/webp/svg/bmp/ico/avif、タップで原寸トグル)
 - ピンチで文字サイズ変更
 - ブラウザの戻るでファイル一覧へ
 - ファイル mtime を long-poll で監視、変更があれば自動リロード
@@ -59,7 +60,7 @@ FB_TOKEN=mysecret fb
 
 ## 制限
 
-- 表示するファイルは 2 MiB まで
+- 表示するファイルは 2 MiB まで（画像は 20 MiB まで）
 - grep 対象は 1 ファイル 4 MiB まで、合計マッチ 500 件で打ち切り
 
 ## リリース・配布

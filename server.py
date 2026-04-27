@@ -30,8 +30,15 @@ ROOT = Path.cwd().resolve()
 TOKEN = ""  # set in main()
 
 MAX_FILE_BYTES = 2 * 1024 * 1024
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_GREP_MATCHES = 500
 MAX_GREP_FILE_BYTES = 4 * 1024 * 1024
+
+IMAGE_MIME = {
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml",
+    "bmp": "image/bmp", "ico": "image/x-icon", "avif": "image/avif",
+}
 SKIP_DIRS = {
     ".git", "node_modules", ".venv", "venv", "__pycache__",
     ".mypy_cache", ".pytest_cache", "dist", "build", ".next",
@@ -182,6 +189,13 @@ button { font: inherit; }
   padding: 0 !important; overflow: visible !important; }
 .hlmark { background: #9e6a0366; border-radius: 2px; }
 
+#imageWrap { padding: 12px; text-align: center; }
+#imageView { max-width: 100%; height: auto;
+  background: #161b22; border-radius: 4px;
+  image-rendering: -webkit-optimize-contrast; }
+#imageView.actual { max-width: none; cursor: zoom-out; }
+#imageView:not(.actual) { cursor: zoom-in; }
+
 .line { display: block; padding-left: 3.2em; position: relative;
   min-height: 1em; }
 .ln { position: absolute; left: 0; width: 2.6em;
@@ -271,6 +285,7 @@ button { font: inherit; }
       pinch to change font size
     </div>
     <pre id="viewerWrap" style="display:none"><code id="viewer"></code></pre>
+    <div id="imageWrap" style="display:none"><img id="imageView" alt=""></div>
   </div>
   <div id="grep">
     <div class="row">
@@ -414,21 +429,38 @@ async function openFile(path, opts) {
     const res = await api('/api/file', { path });
     const wrap = $('viewerWrap');
     const viewer = $('viewer');
+    const imageWrap = $('imageWrap');
+    const imageView = $('imageView');
     $('placeholder').style.display = 'none';
-    wrap.style.display = '';
     const savedScroll = preserveScroll ? $('content').scrollTop : null;
-    if (res.binary) {
-      viewer.removeAttribute('class');
-      viewer.textContent = '[binary file · ' + res.size + ' bytes]';
-    } else {
-      viewer.textContent = res.content + (res.truncated ? '\n\n[truncated at ' + res.size + ' bytes]' : '');
-      const lang = langFor(path.split('/').pop());
-      viewer.className = lang ? 'language-' + lang : '';
-      delete viewer.dataset.highlighted;
-      if (window.hljs) {
-        try { hljs.highlightElement(viewer); } catch (e) {}
+    if (res.image) {
+      wrap.style.display = 'none';
+      imageView.classList.remove('actual');
+      if (res.tooLarge) {
+        imageWrap.style.display = 'none';
+        imageView.removeAttribute('src');
+        toast('image too large (' + res.size + ' bytes)');
+      } else {
+        imageWrap.style.display = '';
+        imageView.src = '/api/raw?path=' + encodeURIComponent(path) + '&v=' + (res.mtime || '');
       }
-      wrapLines(viewer);
+    } else {
+      imageWrap.style.display = 'none';
+      imageView.removeAttribute('src');
+      wrap.style.display = '';
+      if (res.binary) {
+        viewer.removeAttribute('class');
+        viewer.textContent = '[binary file · ' + res.size + ' bytes]';
+      } else {
+        viewer.textContent = res.content + (res.truncated ? '\n\n[truncated at ' + res.size + ' bytes]' : '');
+        const lang = langFor(path.split('/').pop());
+        viewer.className = lang ? 'language-' + lang : '';
+        delete viewer.dataset.highlighted;
+        if (window.hljs) {
+          try { hljs.highlightElement(viewer); } catch (e) {}
+        }
+        wrapLines(viewer);
+      }
     }
     if (jumpLine) scrollToLine(jumpLine);
     else if (savedScroll !== null) $('content').scrollTop = savedScroll;
@@ -742,9 +774,16 @@ $('viewer').addEventListener('touchcancel', () => {
   if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
 }, { passive: true });
 
+// tap image to toggle fit-width / actual size
+$('imageView').addEventListener('click', () => {
+  $('imageView').classList.toggle('actual');
+});
+
 function showTree() {
   cancelWatch();
   $('viewerWrap').style.display = 'none';
+  $('imageWrap').style.display = 'none';
+  $('imageView').removeAttribute('src');
   $('placeholder').style.display = '';
   $('title').firstElementChild.textContent = 'select a file';
   currentPath = null;
@@ -848,6 +887,11 @@ class Handler(BaseHTTPRequestHandler):
                 st = p.stat()
                 size = st.st_size
                 mtime = str(st.st_mtime_ns)
+                ext = p.suffix.lower().lstrip(".")
+                if ext in IMAGE_MIME:
+                    self._json({"size": size, "mtime": mtime, "image": True,
+                                "tooLarge": size > MAX_IMAGE_BYTES})
+                    return
                 with p.open("rb") as fh:
                     data = fh.read(MAX_FILE_BYTES + 1)
                 truncated = len(data) > MAX_FILE_BYTES
@@ -860,6 +904,23 @@ class Handler(BaseHTTPRequestHandler):
                     payload["binary"] = False
                     payload["content"] = data.decode("utf-8", errors="replace")
                 self._json(payload)
+            except Exception:
+                self._send(400, b"bad path", "text/plain")
+            return
+
+        if path == "/api/raw":
+            rel = qs.get("path", [""])[0]
+            try:
+                p = safe_path(rel)
+                if not p.is_file():
+                    self._send(404, b"not found", "text/plain"); return
+                ext = p.suffix.lower().lstrip(".")
+                ctype = IMAGE_MIME.get(ext)
+                if not ctype:
+                    self._send(415, b"unsupported", "text/plain"); return
+                if p.stat().st_size > MAX_IMAGE_BYTES:
+                    self._send(413, b"too large", "text/plain"); return
+                self._send(200, p.read_bytes(), ctype)
             except Exception:
                 self._send(400, b"bad path", "text/plain")
             return
