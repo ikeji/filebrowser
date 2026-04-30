@@ -33,6 +33,9 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_GREP_MATCHES = 500
 MAX_GREP_FILE_BYTES = 4 * 1024 * 1024
+TAIL_THRESHOLD = 100 * 1024
+TAIL_LINES = 500
+TAIL_MAX_FILE_BYTES = 64 * 1024 * 1024
 
 IMAGE_MIME = {
     "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
@@ -189,6 +192,10 @@ button { font: inherit; }
   padding: 0 !important; overflow: visible !important; }
 .hlmark { background: #9e6a0366; border-radius: 2px; }
 
+#tailNote { padding: 8px 14px; background: #21262d;
+  border-bottom: 1px solid #30363d; font-size: 12px;
+  color: #8b949e; position: sticky; top: 0; z-index: 1; }
+
 #imageWrap { padding: 12px; text-align: center; }
 #imageView { max-width: 100%; height: auto;
   background: #161b22; border-radius: 4px;
@@ -284,6 +291,7 @@ button { font: inherit; }
       tap ⌕ to search across files<br>
       pinch to change font size
     </div>
+    <div id="tailNote" style="display:none"></div>
     <pre id="viewerWrap" style="display:none"><code id="viewer"></code></pre>
     <div id="imageWrap" style="display:none"><img id="imageView" alt=""></div>
   </div>
@@ -433,8 +441,10 @@ async function openFile(path, opts) {
     const imageView = $('imageView');
     $('placeholder').style.display = 'none';
     const savedScroll = preserveScroll ? $('content').scrollTop : null;
+    const tailNote = $('tailNote');
     if (res.image) {
       wrap.style.display = 'none';
+      tailNote.style.display = 'none';
       imageView.classList.remove('actual');
       if (res.tooLarge) {
         imageWrap.style.display = 'none';
@@ -451,6 +461,7 @@ async function openFile(path, opts) {
       if (res.binary) {
         viewer.removeAttribute('class');
         viewer.textContent = '[binary file · ' + res.size + ' bytes]';
+        tailNote.style.display = 'none';
       } else {
         viewer.textContent = res.content + (res.truncated ? '\n\n[truncated at ' + res.size + ' bytes]' : '');
         const lang = langFor(path.split('/').pop());
@@ -459,12 +470,25 @@ async function openFile(path, opts) {
         if (window.hljs) {
           try { hljs.highlightElement(viewer); } catch (e) {}
         }
-        wrapLines(viewer);
+        wrapLines(viewer, res.startLine || 1);
+        if (res.tail) {
+          const last = (res.startLine || 1) + res.tailLines - 1;
+          tailNote.textContent = res.partial
+            ? 'tail · last ' + res.tailLines + ' lines (file > 64 MiB, line numbers relative)'
+            : 'tail · lines ' + res.startLine + '–' + last + ' of ' + res.totalLines;
+          tailNote.style.display = '';
+        } else {
+          tailNote.style.display = 'none';
+        }
       }
     }
     if (jumpLine) scrollToLine(jumpLine);
     else if (savedScroll !== null) $('content').scrollTop = savedScroll;
-    else $('content').scrollTop = 0;
+    else if (res.tail && !res.binary) {
+      const lastEl = viewer.querySelector('.line:last-child');
+      if (lastEl) lastEl.scrollIntoView({ block: 'end' });
+      else $('content').scrollTop = 0;
+    } else $('content').scrollTop = 0;
     if (res.mtime) startWatch(path, res.mtime);
   } catch (e) {
     toast('failed to load ' + path);
@@ -521,7 +545,8 @@ function scrollToLine(line) {
 
 // --- wrap every source line in <span class="line"><span class="ln">N</span>...</span>
 // Walks the DOM so hljs multi-line tokens (comments/strings) stay highlighted.
-function wrapLines(codeEl) {
+function wrapLines(codeEl, startLine) {
+  const start = startLine || 1;
   // Collect segments per source line.
   const lines = [[]]; // lines[i] = array of { stack: [{tag,cls},...], text }
   function walk(node, stack) {
@@ -543,7 +568,7 @@ function wrapLines(codeEl) {
   const out = [];
   for (let i = 0; i < lines.length; i++) {
     const segs = lines[i];
-    const n = i + 1;
+    const n = i + start;
     let html = '<span class="line" data-line="' + n + '"><span class="ln" data-line="' + n + '">' + n + '</span>';
     for (const seg of segs) {
       for (const fr of seg.stack) {
@@ -784,6 +809,7 @@ function showTree() {
   $('viewerWrap').style.display = 'none';
   $('imageWrap').style.display = 'none';
   $('imageView').removeAttribute('src');
+  $('tailNote').style.display = 'none';
   $('placeholder').style.display = '';
   $('title').firstElementChild.textContent = 'select a file';
   currentPath = null;
@@ -891,6 +917,31 @@ class Handler(BaseHTTPRequestHandler):
                 if ext in IMAGE_MIME:
                     self._json({"size": size, "mtime": mtime, "image": True,
                                 "tooLarge": size > MAX_IMAGE_BYTES})
+                    return
+                if size > TAIL_THRESHOLD:
+                    partial = size > TAIL_MAX_FILE_BYTES
+                    with p.open("rb") as fh:
+                        if partial:
+                            fh.seek(size - TAIL_MAX_FILE_BYTES)
+                            data = fh.read()
+                            nl = data.find(b"\n")
+                            if nl >= 0:
+                                data = data[nl + 1:]
+                        else:
+                            data = fh.read()
+                    if not is_probably_text(data):
+                        self._json({"size": size, "mtime": mtime, "binary": True}); return
+                    lines = data.splitlines()
+                    tail = lines[-TAIL_LINES:]
+                    total_lines = None if partial else len(lines)
+                    start_line = (total_lines - len(tail) + 1) if total_lines is not None else None
+                    content = b"\n".join(tail).decode("utf-8", errors="replace")
+                    self._json({
+                        "size": size, "mtime": mtime, "binary": False,
+                        "tail": True, "partial": partial,
+                        "tailLines": len(tail), "totalLines": total_lines,
+                        "startLine": start_line, "content": content,
+                    })
                     return
                 with p.open("rb") as fh:
                     data = fh.read(MAX_FILE_BYTES + 1)

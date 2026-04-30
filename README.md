@@ -43,6 +43,7 @@ FB_TOKEN=mysecret fb
 - ファイルツリー（lazy 展開、`.git` `node_modules` などは除外）
 - ビューア: シンタックスハイライト、行番号、画面幅で折り返し
 - 画像プレビュー (png/jpg/gif/webp/svg/bmp/ico/avif、タップで原寸トグル)
+- 100 KiB 超のテキストは tail モード (末尾 500 行のみ、行番号は絶対値)
 - ピンチで文字サイズ変更
 - ブラウザの戻るでファイル一覧へ
 - ファイル mtime を long-poll で監視、変更があれば自動リロード
