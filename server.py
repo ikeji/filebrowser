@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import codecs
 import errno
+import html
 import json
 import os
 import random
@@ -140,7 +141,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <meta name="color-scheme" content="dark">
-<title>files</title>
+<title>__FB_TITLE__</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.10.0/build/styles/github-dark.min.css">
 <style>
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -324,6 +325,7 @@ button { font: inherit; }
 </div>
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.10.0/build/highlight.min.js"></script>
 <script>
+const ROOT_NAME = __FB_TITLE_JS__;
 const $ = id => document.getElementById(id);
 
 async function api(path, params) {
@@ -429,6 +431,7 @@ async function openFile(path, opts) {
   const { jumpLine, fromHistory, preserveScroll } = opts;
   currentPath = path;
   $('title').firstElementChild.textContent = path;
+  document.title = ROOT_NAME + '/' + path;
   if (!fromHistory) {
     history.pushState({view: 'file', path, jumpLine: jumpLine || null}, '',
       '#' + encodeURIComponent(path));
@@ -813,6 +816,7 @@ function showTree() {
   $('tailNote').style.display = 'none';
   $('placeholder').style.display = '';
   $('title').firstElementChild.textContent = 'select a file';
+  document.title = ROOT_NAME;
   currentPath = null;
   $('grep').classList.remove('show');
   openSidebar();
@@ -891,7 +895,11 @@ class Handler(BaseHTTPRequestHandler):
         path = u.path
         if path == "/" or path == "/index.html":
             extra = [("Set-Cookie", f"fb_token={TOKEN}; Path=/; SameSite=Strict")]
-            self._send(200, INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8", extra)
+            root_name = ROOT.name or "/"
+            page = (INDEX_HTML
+                    .replace("__FB_TITLE__", html.escape(root_name))
+                    .replace("__FB_TITLE_JS__", json.dumps(root_name)))
+            self._send(200, page.encode("utf-8"), "text/html; charset=utf-8", extra)
             return
 
         if path == "/api/tree":
