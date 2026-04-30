@@ -21,6 +21,7 @@ import re
 import secrets
 import socket
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1149,20 +1150,30 @@ def main() -> None:
 
     httpd = bind_server(args.host, args.port)
     port = httpd.server_address[1]
-    print(f"[fb] serving: {ROOT}")
-    printed: set[str] = set()
     ifaces = list_interfaces()
     if not ifaces:
         ifaces = [("lan", lan_ip())]
     label_w = max((len(lbl) for lbl, _ in ifaces), default=5)
-    for label, ip in ifaces:
-        if ip in printed:
-            continue
-        printed.add(ip)
-        print(f"[fb] {label:<{label_w}}  http://{ip}:{port}/?t={TOKEN}")
-    print(f"[fb] {'local':<{label_w}}  http://127.0.0.1:{port}/?t={TOKEN}")
+
+    def print_urls() -> None:
+        print(f"[fb] serving: {ROOT}")
+        seen: set[str] = set()
+        for label, ip in ifaces:
+            if ip in seen:
+                continue
+            seen.add(ip)
+            print(f"[fb] {label:<{label_w}}  http://{ip}:{port}/?t={TOKEN}")
+        print(f"[fb] {'local':<{label_w}}  http://127.0.0.1:{port}/?t={TOKEN}")
+
+    print_urls()
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
     try:
-        httpd.serve_forever()
+        while True:
+            line = sys.stdin.readline()
+            if not line:  # EOF (Ctrl-D or stdin closed) — keep serving
+                threading.Event().wait()
+                break
+            print_urls()
     except KeyboardInterrupt:
         print("\n[fb] bye")
 
