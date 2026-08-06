@@ -854,9 +854,13 @@ function openCommentDialog(line) {
   if (!currentPath || line == null) return;
   pendingLine = line;
   $('commentLabel').textContent = 'Insert after line ' + line + ' of ' + currentPath;
-  $('commentText').value = '';
+  const ta = $('commentText');
+  ta.value = 'NOTE: ';
   $('commentModal').classList.add('show');
-  setTimeout(() => $('commentText').focus(), 50);
+  setTimeout(() => {
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }, 50);
 }
 function closeCommentDialog() {
   $('commentModal').classList.remove('show');
