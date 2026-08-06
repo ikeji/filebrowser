@@ -198,6 +198,43 @@ button { font: inherit; }
   border-bottom: 1px solid #30363d; font-size: 12px;
   color: #8b949e; position: sticky; top: 0; z-index: 1; }
 
+#viewTabs { display: none; position: sticky; top: 0; z-index: 2;
+  gap: 6px; padding: 8px; background: #0d1117;
+  border-bottom: 1px solid #30363d; }
+#viewTabs.show { display: flex; }
+#viewTabs button { flex: 1; height: 40px; background: #161b22;
+  border: 1px solid #30363d; color: #8b949e;
+  border-radius: 6px; font-size: 14px; }
+#viewTabs button.active { background: #1f6feb33; color: #c9d1d9;
+  border-color: #1f6feb; }
+
+#mdWrap { padding: 16px 14px 60vh; font-size: 16px; line-height: 1.6;
+  max-width: 860px; overflow-wrap: break-word; }
+#mdWrap h1, #mdWrap h2 { border-bottom: 1px solid #30363d;
+  padding-bottom: .3em; }
+#mdWrap h1 { font-size: 1.6em; } #mdWrap h2 { font-size: 1.35em; }
+#mdWrap h3 { font-size: 1.15em; }
+#mdWrap a { color: #58a6ff; }
+#mdWrap img { max-width: 100%; height: auto; background: #161b22;
+  border-radius: 4px; }
+#mdWrap code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: #6e768166; padding: .15em .35em; border-radius: 4px;
+  font-size: .88em; }
+#mdWrap pre { background: #161b22; border: 1px solid #30363d;
+  padding: 12px; border-radius: 6px; overflow-x: auto; }
+#mdWrap pre code { background: transparent; padding: 0; display: block;
+  font-size: .85em; line-height: 1.5; }
+#mdWrap blockquote { border-left: 3px solid #30363d; margin: 0 0 16px;
+  padding: 0 1em; color: #8b949e; }
+#mdWrap table { border-collapse: collapse; display: block;
+  overflow-x: auto; max-width: 100%; }
+#mdWrap th, #mdWrap td { border: 1px solid #30363d; padding: 6px 12px; }
+#mdWrap th { background: #161b22; }
+#mdWrap hr { border: 0; border-top: 1px solid #30363d; margin: 20px 0; }
+#mdWrap ul, #mdWrap ol { padding-left: 1.6em; }
+#mdWrap li { margin: .2em 0; }
+#mdWrap input[type=checkbox] { margin-right: 6px; }
+
 #imageWrap { padding: 12px; text-align: center; }
 #imageView { max-width: 100%; height: auto;
   background: #161b22; border-radius: 4px;
@@ -293,8 +330,13 @@ button { font: inherit; }
       tap ⌕ to search across files<br>
       pinch to change font size
     </div>
+    <div id="viewTabs">
+      <button id="tabPreview">preview</button>
+      <button id="tabSource">source</button>
+    </div>
     <div id="tailNote" style="display:none"></div>
     <pre id="viewerWrap" style="display:none"><code id="viewer"></code></pre>
+    <div id="mdWrap" style="display:none"></div>
     <div id="imageWrap" style="display:none"><img id="imageView" alt=""></div>
   </div>
   <div id="grep">
@@ -324,6 +366,8 @@ button { font: inherit; }
   </div>
 </div>
 <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.10.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js"></script>
 <script>
 const ROOT_NAME = __FB_TITLE_JS__;
 const $ = id => document.getElementById(id);
@@ -444,6 +488,9 @@ async function openFile(path, opts) {
     const imageWrap = $('imageWrap');
     const imageView = $('imageView');
     $('placeholder').style.display = 'none';
+    $('viewTabs').classList.remove('show');
+    $('mdWrap').style.display = 'none';
+    mdSource = null;
     const savedScroll = preserveScroll ? $('content').scrollTop : null;
     const tailNote = $('tailNote');
     if (res.image) {
@@ -483,6 +530,12 @@ async function openFile(path, opts) {
           tailNote.style.display = '';
         } else {
           tailNote.style.display = 'none';
+        }
+        if (lang === 'markdown' && !res.tail && !res.truncated && window.marked) {
+          mdSource = res.content;
+          mdRenderedFor = null;
+          $('viewTabs').classList.add('show');
+          applyMdTab(jumpLine ? 'source' : mdTab);
         }
       }
     }
@@ -595,12 +648,81 @@ function escapeAttr(s) {
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// --- markdown preview (tabbed) ---
+let mdSource = null;       // raw markdown of the current file, or null
+let mdRenderedFor = null;  // path the preview in #mdWrap was rendered for
+let mdTab = localStorage.getItem('mdTab') === 'source' ? 'source' : 'preview';
+
+function resolveRel(dir, rel) {
+  const stack = dir ? dir.split('/') : [];
+  for (const part of rel.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') stack.pop();
+    else stack.push(part);
+  }
+  return stack.join('/');
+}
+
+function renderMdPreview() {
+  if (mdRenderedFor === currentPath) return;
+  const el = $('mdWrap');
+  let out;
+  try { out = marked.parse(mdSource); }
+  catch (e) { out = '<p>markdown render error</p>'; }
+  if (window.DOMPurify) out = DOMPurify.sanitize(out);
+  el.innerHTML = out;
+  const dir = currentPath.split('/').slice(0, -1).join('/');
+  el.querySelectorAll('img').forEach(img => {
+    const src = img.getAttribute('src') || '';
+    if (/^([a-z][a-z0-9+.-]*:|\/\/)/i.test(src)) return;
+    img.src = '/api/raw?path=' + encodeURIComponent(resolveRel(dir, src));
+  });
+  el.querySelectorAll('a[href]').forEach(a => {
+    const href = a.getAttribute('href') || '';
+    if (/^([a-z][a-z0-9+.-]*:|\/\/|#)/i.test(href)) {
+      a.target = '_blank'; a.rel = 'noopener';
+      return;
+    }
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      openFile(resolveRel(dir, href));
+    });
+  });
+  if (window.hljs) {
+    el.querySelectorAll('pre code').forEach(c => {
+      try { hljs.highlightElement(c); } catch (e) {}
+    });
+  }
+  mdRenderedFor = currentPath;
+}
+
+function applyMdTab(tab) {
+  $('tabPreview').classList.toggle('active', tab === 'preview');
+  $('tabSource').classList.toggle('active', tab === 'source');
+  if (tab === 'preview' && mdSource !== null) {
+    renderMdPreview();
+    $('viewerWrap').style.display = 'none';
+    $('mdWrap').style.display = '';
+  } else {
+    $('mdWrap').style.display = 'none';
+    $('viewerWrap').style.display = '';
+  }
+}
+
+$('tabPreview').addEventListener('click', () => {
+  mdTab = 'preview'; localStorage.setItem('mdTab', mdTab); applyMdTab(mdTab);
+});
+$('tabSource').addEventListener('click', () => {
+  mdTab = 'source'; localStorage.setItem('mdTab', mdTab); applyMdTab(mdTab);
+});
+
 // --- font size / pinch zoom ---
 let fontSize = parseFloat(localStorage.getItem('fs') || '13');
 if (!isFinite(fontSize) || fontSize < 6 || fontSize > 60) fontSize = 13;
 
 function applyFontSize() {
   $('viewerWrap').style.fontSize = fontSize.toFixed(1) + 'px';
+  $('mdWrap').style.fontSize = (fontSize + 3).toFixed(1) + 'px';
   localStorage.setItem('fs', fontSize.toFixed(1));
 }
 applyFontSize();
@@ -811,6 +933,9 @@ $('imageView').addEventListener('click', () => {
 function showTree() {
   cancelWatch();
   $('viewerWrap').style.display = 'none';
+  $('mdWrap').style.display = 'none';
+  $('viewTabs').classList.remove('show');
+  mdSource = null;
   $('imageWrap').style.display = 'none';
   $('imageView').removeAttribute('src');
   $('tailNote').style.display = 'none';
