@@ -196,7 +196,12 @@ button { font: inherit; }
 
 #tailNote { padding: 8px 14px; background: #21262d;
   border-bottom: 1px solid #30363d; font-size: 12px;
-  color: #8b949e; position: sticky; top: 0; z-index: 1; }
+  color: #8b949e; position: sticky; top: 0; z-index: 1;
+  display: flex; align-items: center; gap: 10px; }
+#tailNote button { background: #30363d; border: 1px solid #484f58;
+  color: #c9d1d9; border-radius: 6px; padding: 0 14px;
+  font-size: 12px; height: 30px; flex-shrink: 0; margin-left: auto; }
+#tailNote button:active { background: #484f58; }
 
 #viewTabs { display: none; position: sticky; top: 0; z-index: 2;
   gap: 6px; padding: 8px; background: #0d1117;
@@ -439,6 +444,7 @@ async function loadTree(path, container) {
 
 // --- file viewer ---
 let currentPath = null;
+let currentFull = false;
 const EXT_LANG = {
   js:'javascript', mjs:'javascript', cjs:'javascript',
   ts:'typescript', tsx:'typescript', jsx:'javascript',
@@ -472,8 +478,9 @@ let watchCtrl = null;
 
 async function openFile(path, opts) {
   opts = opts || {};
-  const { jumpLine, fromHistory, preserveScroll } = opts;
+  const { jumpLine, fromHistory, preserveScroll, full } = opts;
   currentPath = path;
+  currentFull = !!full;
   $('title').firstElementChild.textContent = path;
   document.title = ROOT_NAME + '/' + path;
   if (!fromHistory) {
@@ -482,7 +489,7 @@ async function openFile(path, opts) {
   }
   cancelWatch();
   try {
-    const res = await api('/api/file', { path });
+    const res = await api('/api/file', { path, full: full ? '1' : undefined });
     const wrap = $('viewerWrap');
     const viewer = $('viewer');
     const imageWrap = $('imageWrap');
@@ -518,16 +525,19 @@ async function openFile(path, opts) {
         const lang = langFor(path.split('/').pop());
         viewer.className = lang ? 'language-' + lang : '';
         delete viewer.dataset.highlighted;
-        if (window.hljs) {
+        if (window.hljs && res.content.length <= 500000) {
           try { hljs.highlightElement(viewer); } catch (e) {}
         }
         wrapLines(viewer, res.startLine || 1);
         if (res.tail) {
           const last = (res.startLine || 1) + res.tailLines - 1;
-          tailNote.textContent = res.partial
+          const msg = res.partial
             ? 'tail · last ' + res.tailLines + ' lines (file > 64 MiB, line numbers relative)'
             : 'tail · lines ' + res.startLine + '–' + last + ' of ' + res.totalLines;
-          tailNote.style.display = '';
+          setTailNote(msg, 'full', () => openFile(path, { fromHistory: true, full: true }));
+        } else if (res.fullView) {
+          const kb = Math.round(res.size / 1024);
+          setTailNote('full · ' + kb + ' KiB', 'tail', () => openFile(path, { fromHistory: true }));
         } else {
           tailNote.style.display = 'none';
         }
@@ -550,6 +560,16 @@ async function openFile(path, opts) {
   } catch (e) {
     toast('failed to load ' + path);
   }
+}
+
+function setTailNote(msg, btnLabel, onClick) {
+  const tailNote = $('tailNote');
+  tailNote.textContent = msg;
+  const b = document.createElement('button');
+  b.textContent = btnLabel;
+  b.addEventListener('click', onClick);
+  tailNote.appendChild(b);
+  tailNote.style.display = '';
 }
 
 function cancelWatch() {
@@ -577,7 +597,7 @@ async function startWatch(path, mtime) {
       if (data.deleted) { toast('file deleted'); return; }
       if (data.changed) {
         toast('reloading…');
-        await openFile(path, { fromHistory: true, preserveScroll: true });
+        await openFile(path, { fromHistory: true, preserveScroll: true, full: currentFull });
         return; // openFile starts a new watch
       }
     } catch (e) {
@@ -1044,6 +1064,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/file":
             rel = qs.get("path", [""])[0]
+            full = qs.get("full", ["0"])[0] == "1"
             try:
                 p = safe_path(rel)
                 if not p.is_file():
@@ -1056,7 +1077,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"size": size, "mtime": mtime, "image": True,
                                 "tooLarge": size > MAX_IMAGE_BYTES})
                     return
-                if size > TAIL_THRESHOLD:
+                if size > TAIL_THRESHOLD and not full:
                     partial = size > TAIL_MAX_FILE_BYTES
                     with p.open("rb") as fh:
                         if partial:
@@ -1087,6 +1108,8 @@ class Handler(BaseHTTPRequestHandler):
                 if truncated:
                     data = data[:MAX_FILE_BYTES]
                 payload = {"size": size, "mtime": mtime, "truncated": truncated}
+                if full and size > TAIL_THRESHOLD:
+                    payload["fullView"] = True
                 if not is_probably_text(data):
                     payload["binary"] = True
                 else:
