@@ -26,7 +26,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 ROOT = Path.cwd().resolve()
 TOKEN = ""  # set in main()
@@ -43,6 +43,16 @@ IMAGE_MIME = {
     "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
     "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml",
     "bmp": "image/bmp", "ico": "image/x-icon", "avif": "image/avif",
+}
+VIDEO_MIME = {
+    "mp4": "video/mp4", "m4v": "video/x-m4v", "webm": "video/webm",
+    "mov": "video/quicktime", "mkv": "video/x-matroska",
+    "ogv": "video/ogg", "avi": "video/x-msvideo",
+}
+AUDIO_MIME = {
+    "mp3": "audio/mpeg", "wav": "audio/wav", "m4a": "audio/mp4",
+    "ogg": "audio/ogg", "oga": "audio/ogg", "opus": "audio/opus",
+    "flac": "audio/flac", "aac": "audio/aac",
 }
 SKIP_DIRS = {
     ".git", "node_modules", ".venv", "venv", "__pycache__",
@@ -247,6 +257,18 @@ button { font: inherit; }
 #imageView.actual { max-width: none; cursor: zoom-out; }
 #imageView:not(.actual) { cursor: zoom-in; }
 
+#mediaWrap { padding: 12px; }
+#videoView { display: block; width: 100%; max-height: 75vh;
+  background: #000; border-radius: 6px; }
+#audioView { display: block; width: 100%; }
+#mediaMeta { display: flex; align-items: center; gap: 12px;
+  margin-top: 12px; font-size: 13px; color: #8b949e; }
+#mediaMeta .dlBtn { margin-left: auto; display: inline-flex;
+  align-items: center; height: 40px; padding: 0 18px;
+  background: #238636; border-radius: 6px; color: #fff;
+  text-decoration: none; font-size: 14px; }
+#mediaMeta .dlBtn:active { background: #2ea043; }
+
 .line { display: block; padding-left: 3.2em; position: relative;
   min-height: 1em; }
 .ln { position: absolute; left: 0; width: 2.6em;
@@ -343,6 +365,11 @@ button { font: inherit; }
     <pre id="viewerWrap" style="display:none"><code id="viewer"></code></pre>
     <div id="mdWrap" style="display:none"></div>
     <div id="imageWrap" style="display:none"><img id="imageView" alt=""></div>
+    <div id="mediaWrap" style="display:none">
+      <video id="videoView" controls playsinline preload="metadata" style="display:none"></video>
+      <audio id="audioView" controls preload="metadata" style="display:none"></audio>
+      <div id="mediaMeta"></div>
+    </div>
   </div>
   <div id="grep">
     <div class="row">
@@ -497,6 +524,8 @@ async function openFile(path, opts) {
     $('placeholder').style.display = 'none';
     $('viewTabs').classList.remove('show');
     $('mdWrap').style.display = 'none';
+    $('mediaWrap').style.display = 'none';
+    stopMedia();
     mdSource = null;
     const savedScroll = preserveScroll ? $('content').scrollTop : null;
     const tailNote = $('tailNote');
@@ -512,41 +541,41 @@ async function openFile(path, opts) {
         imageWrap.style.display = '';
         imageView.src = '/api/raw?path=' + encodeURIComponent(path) + '&v=' + (res.mtime || '');
       }
+    } else if (res.media || res.binary) {
+      wrap.style.display = 'none';
+      imageWrap.style.display = 'none';
+      imageView.removeAttribute('src');
+      tailNote.style.display = 'none';
+      showMedia(path, res);
     } else {
       imageWrap.style.display = 'none';
       imageView.removeAttribute('src');
       wrap.style.display = '';
-      if (res.binary) {
-        viewer.removeAttribute('class');
-        viewer.textContent = '[binary file · ' + res.size + ' bytes]';
-        tailNote.style.display = 'none';
+      viewer.textContent = res.content + (res.truncated ? '\n\n[truncated at ' + res.size + ' bytes]' : '');
+      const lang = langFor(path.split('/').pop());
+      viewer.className = lang ? 'language-' + lang : '';
+      delete viewer.dataset.highlighted;
+      if (window.hljs && res.content.length <= 500000) {
+        try { hljs.highlightElement(viewer); } catch (e) {}
+      }
+      wrapLines(viewer, res.startLine || 1);
+      if (res.tail) {
+        const last = (res.startLine || 1) + res.tailLines - 1;
+        const msg = res.partial
+          ? 'tail · last ' + res.tailLines + ' lines (file > 64 MiB, line numbers relative)'
+          : 'tail · lines ' + res.startLine + '–' + last + ' of ' + res.totalLines;
+        setTailNote(msg, 'full', () => openFile(path, { fromHistory: true, full: true }));
+      } else if (res.fullView) {
+        const kb = Math.round(res.size / 1024);
+        setTailNote('full · ' + kb + ' KiB', 'tail', () => openFile(path, { fromHistory: true }));
       } else {
-        viewer.textContent = res.content + (res.truncated ? '\n\n[truncated at ' + res.size + ' bytes]' : '');
-        const lang = langFor(path.split('/').pop());
-        viewer.className = lang ? 'language-' + lang : '';
-        delete viewer.dataset.highlighted;
-        if (window.hljs && res.content.length <= 500000) {
-          try { hljs.highlightElement(viewer); } catch (e) {}
-        }
-        wrapLines(viewer, res.startLine || 1);
-        if (res.tail) {
-          const last = (res.startLine || 1) + res.tailLines - 1;
-          const msg = res.partial
-            ? 'tail · last ' + res.tailLines + ' lines (file > 64 MiB, line numbers relative)'
-            : 'tail · lines ' + res.startLine + '–' + last + ' of ' + res.totalLines;
-          setTailNote(msg, 'full', () => openFile(path, { fromHistory: true, full: true }));
-        } else if (res.fullView) {
-          const kb = Math.round(res.size / 1024);
-          setTailNote('full · ' + kb + ' KiB', 'tail', () => openFile(path, { fromHistory: true }));
-        } else {
-          tailNote.style.display = 'none';
-        }
-        if (lang === 'markdown' && !res.tail && !res.truncated && window.marked) {
-          mdSource = res.content;
-          mdRenderedFor = null;
-          $('viewTabs').classList.add('show');
-          applyMdTab(jumpLine ? 'source' : mdTab);
-        }
+        tailNote.style.display = 'none';
+      }
+      if (lang === 'markdown' && !res.tail && !res.truncated && window.marked) {
+        mdSource = res.content;
+        mdRenderedFor = null;
+        $('viewTabs').classList.add('show');
+        applyMdTab(jumpLine ? 'source' : mdTab);
       }
     }
     if (jumpLine) scrollToLine(jumpLine);
@@ -559,6 +588,35 @@ async function openFile(path, opts) {
     if (res.mtime) startWatch(path, res.mtime);
   } catch (e) {
     toast('failed to load ' + path);
+  }
+}
+
+function fmtSize(n) {
+  return n >= 1048576 ? (n / 1048576).toFixed(1) + ' MiB'
+    : Math.max(1, Math.round(n / 1024)) + ' KiB';
+}
+
+function showMedia(path, res) {
+  const vv = $('videoView'), av = $('audioView');
+  $('mediaWrap').style.display = '';
+  vv.style.display = 'none';
+  av.style.display = 'none';
+  const src = '/api/raw?path=' + encodeURIComponent(path) + '&v=' + (res.mtime || '');
+  if (res.media === 'video') { vv.src = src; vv.style.display = ''; }
+  else if (res.media === 'audio') { av.src = src; av.style.display = ''; }
+  $('mediaMeta').innerHTML =
+    '<span>' + (res.media || 'binary file') + ' · ' + fmtSize(res.size) + '</span>' +
+    '<a class="dlBtn" href="/api/download?path=' + encodeURIComponent(path) + '" download>download</a>';
+}
+
+function stopMedia() {
+  for (const id of ['videoView', 'audioView']) {
+    const el = $(id);
+    try { el.pause(); } catch (e) {}
+    if (el.hasAttribute('src')) {
+      el.removeAttribute('src');
+      try { el.load(); } catch (e) {}
+    }
   }
 }
 
@@ -960,6 +1018,8 @@ function showTree() {
   $('mdWrap').style.display = 'none';
   $('viewTabs').classList.remove('show');
   mdSource = null;
+  $('mediaWrap').style.display = 'none';
+  stopMedia();
   $('imageWrap').style.display = 'none';
   $('imageView').removeAttribute('src');
   $('tailNote').style.display = 'none';
@@ -1004,6 +1064,10 @@ window.addEventListener('popstate', (e) => {
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "fb/0.1"
+    # HTTP/1.1 is required for <video>: Safari/iOS AVFoundation refuses to
+    # play media from HTTP/1.0 servers. Every response sets Content-Length,
+    # so keep-alive is safe.
+    protocol_version = "HTTP/1.1"
 
     def _authed(self, qs: dict) -> bool:
         t = qs.get("t", [None])[0]
@@ -1031,6 +1095,63 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self, obj) -> None:
         self._send(200, json.dumps(obj).encode("utf-8"), "application/json; charset=utf-8")
+
+    def _stream_file(self, p: Path, ctype: str, download: bool = False) -> None:
+        """Send a file, streaming in chunks, honoring a single bytes= Range."""
+        try:
+            size = p.stat().st_size
+            fh = p.open("rb")
+        except OSError:
+            self._send(404, b"not found", "text/plain")
+            return
+        try:
+            start, end, status = 0, size - 1, 200
+            rng = self.headers.get("Range", "")
+            m = re.match(r"bytes=(\d*)-(\d*)$", rng.strip()) if rng else None
+            if m and (m.group(1) or m.group(2)):
+                if m.group(1):
+                    start = int(m.group(1))
+                    if m.group(2):
+                        end = min(int(m.group(2)), size - 1)
+                else:  # suffix range: last N bytes
+                    start = max(0, size - int(m.group(2)))
+                if start >= size:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                status = 206
+            length = max(0, end - start + 1)
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(length))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Cache-Control", "no-store")
+            if status == 206:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            if download:
+                self.send_header("Content-Disposition",
+                                 "attachment; filename*=UTF-8''" + quote(p.name))
+            self.end_headers()
+            fh.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = fh.read(min(65536, remaining))
+                if not chunk:
+                    # file shrank mid-stream; body is short of Content-Length,
+                    # so the connection must not be reused
+                    self.close_connection = True
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+        except OSError:
+            # client gone or read failed mid-stream; headers may already be
+            # sent, so no error response — just make sure the connection
+            # (short of Content-Length) is never reused
+            self.close_connection = True
+        finally:
+            fh.close()
 
     def do_GET(self) -> None:  # noqa: N802
         u = urlparse(self.path)
@@ -1076,6 +1197,10 @@ class Handler(BaseHTTPRequestHandler):
                 if ext in IMAGE_MIME:
                     self._json({"size": size, "mtime": mtime, "image": True,
                                 "tooLarge": size > MAX_IMAGE_BYTES})
+                    return
+                if ext in VIDEO_MIME or ext in AUDIO_MIME:
+                    kind = "video" if ext in VIDEO_MIME else "audio"
+                    self._json({"size": size, "mtime": mtime, "media": kind})
                     return
                 if size > TAIL_THRESHOLD and not full:
                     partial = size > TAIL_MAX_FILE_BYTES
@@ -1128,11 +1253,27 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(404, b"not found", "text/plain"); return
                 ext = p.suffix.lower().lstrip(".")
                 ctype = IMAGE_MIME.get(ext)
-                if not ctype:
-                    self._send(415, b"unsupported", "text/plain"); return
-                if p.stat().st_size > MAX_IMAGE_BYTES:
-                    self._send(413, b"too large", "text/plain"); return
-                self._send(200, p.read_bytes(), ctype)
+                if ctype:
+                    if p.stat().st_size > MAX_IMAGE_BYTES:
+                        self._send(413, b"too large", "text/plain"); return
+                    self._send(200, p.read_bytes(), ctype)
+                    return
+                # anything else: stream the exact bytes (media inline,
+                # unknown types as octet-stream so browsers download them)
+                ctype = (VIDEO_MIME.get(ext) or AUDIO_MIME.get(ext)
+                         or "application/octet-stream")
+                self._stream_file(p, ctype)
+            except Exception:
+                self._send(400, b"bad path", "text/plain")
+            return
+
+        if path == "/api/download":
+            rel = qs.get("path", [""])[0]
+            try:
+                p = safe_path(rel)
+                if not p.is_file():
+                    self._send(404, b"not found", "text/plain"); return
+                self._stream_file(p, "application/octet-stream", download=True)
             except Exception:
                 self._send(400, b"bad path", "text/plain")
             return
