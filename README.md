@@ -27,10 +27,10 @@ fb
 ### オプション
 
 ```
---host HOST    bind address (default: 0.0.0.0)
+--host HOST    bind address (default: 0.0.0.0、--no-token 時は 127.0.0.1)
 --port PORT    default: 8000-8999 からランダムに空きを探す
 --token TOKEN  認証トークン (default: $FB_TOKEN、無ければランダム生成)
---no-token     認証なし（ポートに届く人は誰でも読み書きできる）
+--no-token     認証なし（デフォルトで 127.0.0.1 のみに bind）
 ```
 
 トークンを固定したい場合（再起動しても同じ URL を使い続けたい等）は環境変数で:
@@ -39,10 +39,11 @@ fb
 FB_TOKEN=mysecret fb
 ```
 
-トークン自体を無しにする（URL に `?t=` が付かない）なら `--no-token`。`$FB_TOKEN` が設定されていても無視される。信頼できるネットワーク内、または `--host 127.0.0.1` と併用する前提:
+トークン自体を無しにする（URL に `?t=` が付かない）なら `--no-token`。`$FB_TOKEN` が設定されていても無視される。この場合デフォルトの bind は `127.0.0.1` になる。他の端末から開きたいときは `--host` を明示する（ポートに届く人は誰でも読み書きできるので、信頼できるネットワーク内だけで）:
 
 ```sh
-fb --no-token --host 127.0.0.1
+fb --no-token                  # 127.0.0.1 のみ
+fb --no-token --host 0.0.0.0   # LAN / tailnet にも公開
 ```
 
 ## 機能

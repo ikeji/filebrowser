@@ -1448,7 +1448,8 @@ def main() -> None:
         pass
 
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--host", default=None,
+                    help="bind address (default: 0.0.0.0, or 127.0.0.1 with --no-token)")
     ap.add_argument("--port", type=int, default=0,
                     help="default: random free port in 8000-8999")
     ap.add_argument("--token", default=None,
@@ -1463,12 +1464,14 @@ def main() -> None:
     if not args.no_token:
         TOKEN = args.token or os.environ.get("FB_TOKEN") or secrets.token_urlsafe(18)
     query = f"?t={TOKEN}" if TOKEN else ""
+    host = args.host or ("127.0.0.1" if args.no_token else "0.0.0.0")
 
-    httpd = bind_server(args.host, args.port)
+    httpd = bind_server(host, args.port)
     port = httpd.server_address[1]
-    ifaces = list_interfaces()
-    if not ifaces:
-        ifaces = [("lan", lan_ip())]
+    if host in ("127.0.0.1", "localhost"):
+        ifaces = []  # loopback only: other interfaces are unreachable
+    else:
+        ifaces = list_interfaces() or [("lan", lan_ip())]
     label_w = max((len(lbl) for lbl, _ in ifaces), default=5)
 
     def print_urls() -> None:
