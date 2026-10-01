@@ -30,12 +30,19 @@ fb
 --host HOST    bind address (default: 0.0.0.0)
 --port PORT    default: 8000-8999 からランダムに空きを探す
 --token TOKEN  認証トークン (default: $FB_TOKEN、無ければランダム生成)
+--no-token     認証なし（ポートに届く人は誰でも読み書きできる）
 ```
 
 トークンを固定したい場合（再起動しても同じ URL を使い続けたい等）は環境変数で:
 
 ```sh
 FB_TOKEN=mysecret fb
+```
+
+トークン自体を無しにする（URL に `?t=` が付かない）なら `--no-token`。`$FB_TOKEN` が設定されていても無視される。信頼できるネットワーク内、または `--host 127.0.0.1` と併用する前提:
+
+```sh
+fb --no-token --host 127.0.0.1
 ```
 
 ## 機能
@@ -57,6 +64,7 @@ FB_TOKEN=mysecret fb
 - トークン: 起動ごとに `secrets.token_urlsafe(18)`、`secrets.compare_digest` で比較
 - パスは `Path.resolve()` でルート脱出を防ぐ
 - 認証は token + Cookie のみ。**信頼できないネットワークには出さない**こと（HTTP 平文）。tailnet か LAN 限定で使う前提。
+- `--no-token` では認証が一切ない。別サイトからの書き込み (CSRF) を防ぐため、POST は Origin が一致しないと拒否する。
 - POST `/api/insert` で書き込みできる。LAN/tailnet 内に許可していない人がいるなら使わない。
 
 ## 制限

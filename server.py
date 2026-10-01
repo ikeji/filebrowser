@@ -29,7 +29,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 ROOT = Path.cwd().resolve()
-TOKEN = ""  # set in main()
+TOKEN = ""  # set in main(); empty = auth disabled (--no-token)
 
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -1070,6 +1070,8 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def _authed(self, qs: dict) -> bool:
+        if not TOKEN:
+            return True
         t = qs.get("t", [None])[0]
         if t and secrets.compare_digest(t, TOKEN):
             return True
@@ -1164,7 +1166,8 @@ class Handler(BaseHTTPRequestHandler):
 
         path = u.path
         if path == "/" or path == "/index.html":
-            extra = [("Set-Cookie", f"fb_token={TOKEN}; Path=/; SameSite=Strict")]
+            extra = ([("Set-Cookie", f"fb_token={TOKEN}; Path=/; SameSite=Strict")]
+                     if TOKEN else None)
             root_name = ROOT.name or "/"
             page = (INDEX_HTML
                     .replace("__FB_TITLE__", html.escape(root_name))
@@ -1318,6 +1321,12 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(u.query)
         if not self._authed(qs):
             self._send(401, b"unauthorized", "text/plain; charset=utf-8"); return
+        # without a token there is no SameSite cookie guarding writes, so
+        # reject cross-site POSTs (other web pages targeting this server)
+        origin = self.headers.get("Origin")
+        if not TOKEN and origin and urlparse(origin).netloc != self.headers.get("Host"):
+            self.close_connection = True  # request body is left unread
+            self._send(403, b"cross-origin", "text/plain; charset=utf-8"); return
 
         if u.path == "/api/insert":
             rel = qs.get("path", [""])[0]
@@ -1444,10 +1453,16 @@ def main() -> None:
                     help="default: random free port in 8000-8999")
     ap.add_argument("--token", default=None,
                     help="auth token (default: $FB_TOKEN, else random)")
+    ap.add_argument("--no-token", action="store_true",
+                    help="disable auth: anyone who can reach the port gets in")
     args = ap.parse_args()
+    if args.no_token and args.token:
+        ap.error("--no-token and --token are mutually exclusive")
 
     global TOKEN
-    TOKEN = args.token or os.environ.get("FB_TOKEN") or secrets.token_urlsafe(18)
+    if not args.no_token:
+        TOKEN = args.token or os.environ.get("FB_TOKEN") or secrets.token_urlsafe(18)
+    query = f"?t={TOKEN}" if TOKEN else ""
 
     httpd = bind_server(args.host, args.port)
     port = httpd.server_address[1]
@@ -1458,13 +1473,15 @@ def main() -> None:
 
     def print_urls() -> None:
         print(f"[fb] serving: {ROOT}")
+        if not TOKEN:
+            print("[fb] WARNING: auth disabled (--no-token)")
         seen: set[str] = set()
         for label, ip in ifaces:
             if ip in seen:
                 continue
             seen.add(ip)
-            print(f"[fb] {label:<{label_w}}  http://{ip}:{port}/?t={TOKEN}")
-        print(f"[fb] {'local':<{label_w}}  http://127.0.0.1:{port}/?t={TOKEN}")
+            print(f"[fb] {label:<{label_w}}  http://{ip}:{port}/{query}")
+        print(f"[fb] {'local':<{label_w}}  http://127.0.0.1:{port}/{query}")
 
     print_urls()
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
