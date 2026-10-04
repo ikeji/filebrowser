@@ -239,6 +239,9 @@ button { font: inherit; }
   padding: 12px; border-radius: 6px; overflow-x: auto; }
 #mdWrap pre code { background: transparent; padding: 0; display: block;
   font-size: .85em; line-height: 1.5; }
+#mdWrap .mermaid { margin: 0 0 16px; overflow-x: auto; text-align: center;
+  white-space: pre-wrap; }
+#mdWrap .mermaid svg { max-width: 100%; height: auto; }
 #mdWrap blockquote { border-left: 3px solid #30363d; margin: 0 0 16px;
   padding: 0 1em; color: #8b949e; }
 #mdWrap table { border-collapse: collapse; display: block;
@@ -766,21 +769,56 @@ function renderMdPreview() {
       openFile(resolveRel(dir, href));
     });
   });
+  const diagrams = [];
+  el.querySelectorAll('pre > code.language-mermaid').forEach(c => {
+    const div = document.createElement('div');
+    div.className = 'mermaid';
+    div.textContent = c.textContent;
+    c.parentNode.replaceWith(div);
+    diagrams.push(div);
+  });
   if (window.hljs) {
     el.querySelectorAll('pre code').forEach(c => {
       try { hljs.highlightElement(c); } catch (e) {}
     });
   }
   mdRenderedFor = currentPath;
+  if (diagrams.length) renderMermaid(diagrams);
+}
+
+// mermaid is large, so it is only fetched when a preview actually has a diagram.
+let mermaidLoading = null;
+function loadMermaid() {
+  if (!mermaidLoading) {
+    mermaidLoading = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js';
+      s.onload = () => {
+        mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict' });
+        resolve();
+      };
+      s.onerror = () => { mermaidLoading = null; reject(new Error('load failed')); };
+      document.head.appendChild(s);
+    });
+  }
+  return mermaidLoading;
+}
+
+function renderMermaid(nodes) {
+  loadMermaid().then(() => {
+    // the file may have changed while the script was loading
+    nodes = nodes.filter(n => n.isConnected);
+    if (nodes.length) return mermaid.run({ nodes, suppressErrors: true });
+  }).catch(() => {});
 }
 
 function applyMdTab(tab) {
   $('tabPreview').classList.toggle('active', tab === 'preview');
   $('tabSource').classList.toggle('active', tab === 'source');
   if (tab === 'preview' && mdSource !== null) {
-    renderMdPreview();
     $('viewerWrap').style.display = 'none';
-    $('mdWrap').style.display = '';
+    $('mdWrap').style.display = '';  // visible first: mermaid needs layout to measure
+    renderMdPreview();
   } else {
     $('mdWrap').style.display = 'none';
     $('viewerWrap').style.display = '';
