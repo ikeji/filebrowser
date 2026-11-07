@@ -54,6 +54,10 @@ AUDIO_MIME = {
     "ogg": "audio/ogg", "oga": "audio/ogg", "opus": "audio/opus",
     "flac": "audio/flac", "aac": "audio/aac",
 }
+MODEL_MIME = {
+    "stl": "model/stl",
+    "step": "model/step", "stp": "model/step",
+}
 SKIP_DIRS = {
     ".git", "node_modules", ".venv", "venv", "__pycache__",
     ".mypy_cache", ".pytest_cache", "dist", "build", ".next",
@@ -272,6 +276,50 @@ button { font: inherit; }
   text-decoration: none; font-size: 14px; }
 #mediaMeta .dlBtn:active { background: #2ea043; }
 
+#modelWrap { padding: 12px; }
+#modelStage { position: relative; width: 100%; height: calc(100vh - 140px);
+  min-height: 260px; max-height: 75vh; background: #161b22;
+  border: 1px solid #30363d; border-radius: 6px; overflow: hidden;
+  touch-action: none; user-select: none; -webkit-user-select: none; }
+#modelCanvas { display: block; width: 100%; height: 100%; outline: none; }
+#modelStatus { position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center; font-size: 14px;
+  color: #8b949e; pointer-events: none; background: rgba(13,17,23,.55); }
+#modelMeta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 12px; font-size: 13px; color: #8b949e; }
+#modelMeta .metaText { margin-right: auto; }
+#modelMeta .ctrlBtn { height: 40px; padding: 0 14px; background: #21262d;
+  border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9;
+  font-size: 14px; }
+#modelMeta .ctrlBtn:active { background: #30363d; }
+#modelMeta .ctrlBtn.active { background: #1f6feb33; border-color: #1f6feb; color: #c9d1d9; }
+#modelMeta .dlBtn { display: inline-flex; align-items: center; height: 40px;
+  padding: 0 18px; background: #238636; border-radius: 6px; color: #fff;
+  text-decoration: none; font-size: 14px; }
+#modelMeta .dlBtn:active { background: #2ea043; }
+#modelParts { margin-top: 12px; border: 1px solid #30363d;
+  border-radius: 6px; background: #161b22; overflow: hidden; }
+.mp-head { display: flex; align-items: center; gap: 6px;
+  padding: 8px 10px; border-bottom: 1px solid #30363d;
+  font-size: 13px; color: #8b949e; }
+.mp-head span { margin-right: auto; }
+.mp-btn { height: 32px; padding: 0 12px; background: #21262d;
+  border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9;
+  font-size: 12px; flex-shrink: 0; }
+.mp-btn:active { background: #30363d; }
+.mp-list { max-height: 260px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.mp-row { display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border-bottom: 1px solid #21262d;
+  font-size: 14px; min-height: 44px; cursor: pointer; user-select: none; }
+.mp-row:last-child { border-bottom: none; }
+.mp-row:active { background: #21262d; }
+.mp-row.off { opacity: 0.5; }
+.mp-row input[type=checkbox] { width: 18px; height: 18px; margin: 0; flex-shrink: 0; }
+.mp-swatch { width: 12px; height: 12px; border-radius: 3px;
+  border: 1px solid rgba(255,255,255,.25); flex-shrink: 0; }
+.mp-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-tris { font-size: 12px; color: #8b949e; flex-shrink: 0; }
+
 .line { display: block; padding-left: 3.2em; position: relative;
   min-height: 1em; }
 .ln { position: absolute; left: 0; width: 2.6em;
@@ -372,6 +420,14 @@ button { font: inherit; }
       <video id="videoView" controls playsinline preload="metadata" style="display:none"></video>
       <audio id="audioView" controls preload="metadata" style="display:none"></audio>
       <div id="mediaMeta"></div>
+    </div>
+    <div id="modelWrap" style="display:none">
+      <div id="modelStage">
+        <canvas id="modelCanvas"></canvas>
+        <div id="modelStatus" style="display:none"></div>
+      </div>
+      <div id="modelMeta"></div>
+      <div id="modelParts" style="display:none"></div>
     </div>
   </div>
   <div id="grep">
@@ -528,7 +584,9 @@ async function openFile(path, opts) {
     $('viewTabs').classList.remove('show');
     $('mdWrap').style.display = 'none';
     $('mediaWrap').style.display = 'none';
+    $('modelWrap').style.display = 'none';
     stopMedia();
+    stopModel();
     mdSource = null;
     const savedScroll = preserveScroll ? $('content').scrollTop : null;
     const tailNote = $('tailNote');
@@ -544,6 +602,12 @@ async function openFile(path, opts) {
         imageWrap.style.display = '';
         imageView.src = '/api/raw?path=' + encodeURIComponent(path) + '&v=' + (res.mtime || '');
       }
+    } else if (res.model) {
+      wrap.style.display = 'none';
+      imageWrap.style.display = 'none';
+      imageView.removeAttribute('src');
+      tailNote.style.display = 'none';
+      showModel(path, res);
     } else if (res.media || res.binary) {
       wrap.style.display = 'none';
       imageWrap.style.display = 'none';
@@ -620,6 +684,647 @@ function stopMedia() {
       el.removeAttribute('src');
       try { el.load(); } catch (e) {}
     }
+  }
+}
+
+// --- 3D model preview (STL / STEP) ---
+let threePromise = null;
+let occtPromise = null;
+let modelLoadCtrl = null;
+let modelCtx = null;
+
+function loadThree() {
+  if (!threePromise) {
+    threePromise = import('https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js')
+      .catch(e => { threePromise = null; throw e; });
+  }
+  return threePromise;
+}
+
+function loadOcct() {
+  if (!occtPromise) {
+    const base = 'https://cdn.jsdelivr.net/npm/occt-import-js@0.0.23/dist/';
+    occtPromise = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = base + 'occt-import-js.js';
+      s.onload = () => {
+        occtimportjs({ locateFile: f => base + f }).then(resolve, err => {
+          occtPromise = null; reject(err);
+        });
+      };
+      s.onerror = () => { occtPromise = null; reject(new Error('load failed')); };
+      document.head.appendChild(s);
+    });
+  }
+  return occtPromise;
+}
+
+function parseSTL(buffer, THREE) {
+  const view = new DataView(buffer);
+  let isBinary = false;
+  if (buffer.byteLength >= 84) {
+    const nTri = view.getUint32(80, true);
+    if (84 + nTri * 50 === buffer.byteLength) {
+      isBinary = true;
+    } else {
+      const head = new Uint8Array(buffer, 0, Math.min(512, buffer.byteLength));
+      for (let i = 0; i < head.length; i++) {
+        if (head[i] === 0 && 84 + nTri * 50 <= buffer.byteLength) {
+          isBinary = true; break;
+        }
+      }
+    }
+  }
+  if (isBinary) {
+    const nTri = view.getUint32(80, true);
+    const positions = new Float32Array(nTri * 9);
+    const normals = new Float32Array(nTri * 9);
+    let off = 84;
+    for (let i = 0; i < nTri; i++) {
+      let nx = view.getFloat32(off, true);
+      let ny = view.getFloat32(off + 4, true);
+      let nz = view.getFloat32(off + 8, true);
+      const ax = view.getFloat32(off + 12, true), ay = view.getFloat32(off + 16, true), az = view.getFloat32(off + 20, true);
+      const bx = view.getFloat32(off + 24, true), by = view.getFloat32(off + 28, true), bz = view.getFloat32(off + 32, true);
+      const cx = view.getFloat32(off + 36, true), cy = view.getFloat32(off + 40, true), cz = view.getFloat32(off + 44, true);
+      off += 50;
+      if (nx === 0 && ny === 0 && nz === 0) {
+        const ux = bx - ax, uy = by - ay, uz = bz - az;
+        const vx = cx - ax, vy = cy - ay, vz = cz - az;
+        nx = uy * vz - uz * vy;
+        ny = uz * vx - ux * vz;
+        nz = ux * vy - uy * vx;
+        const len = Math.hypot(nx, ny, nz) || 1;
+        nx /= len; ny /= len; nz /= len;
+      }
+      const j = i * 9;
+      positions[j] = ax; positions[j + 1] = ay; positions[j + 2] = az;
+      positions[j + 3] = bx; positions[j + 4] = by; positions[j + 5] = bz;
+      positions[j + 6] = cx; positions[j + 7] = cy; positions[j + 8] = cz;
+      normals[j] = nx; normals[j + 1] = ny; normals[j + 2] = nz;
+      normals[j + 3] = nx; normals[j + 4] = ny; normals[j + 5] = nz;
+      normals[j + 6] = nx; normals[j + 7] = ny; normals[j + 8] = nz;
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    return {
+      object: new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
+        color: 0x6cb6ff, roughness: 0.45, metalness: 0.15, side: THREE.DoubleSide,
+      })),
+      triangles: nTri,
+    };
+  }
+  const text = new TextDecoder('utf-8').decode(buffer);
+  const pos = [];
+  const re = /vertex\s+([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)\s+([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)\s+([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)/gi;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    pos.push(parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3]));
+  }
+  if (!pos.length) throw new Error('empty STL');
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geom.computeVertexNormals();
+  return {
+    object: new THREE.Mesh(geom, new THREE.MeshStandardMaterial({
+      color: 0x6cb6ff, roughness: 0.45, metalness: 0.15, side: THREE.DoubleSide,
+    })),
+    triangles: Math.floor(pos.length / 9),
+  };
+}
+
+function normRgb(c) {
+  const s = (c[0] > 1 || c[1] > 1 || c[2] > 1) ? 1 / 255 : 1;
+  return [c[0] * s, c[1] * s, c[2] * s];
+}
+
+const PASTEL_PALETTE = [
+  0x8ecae6, 0xffb4a2, 0xa8e6cf, 0xfde284,
+  0xcdb4db, 0xffcad4, 0x90dbf4, 0xf1c0e8,
+  0xb9fbc0, 0xffd6a5, 0xa3c4f3, 0xfbf8cc,
+];
+
+function makeMat(THREE, color) {
+  return new THREE.MeshStandardMaterial({
+    color, roughness: 0.45, metalness: 0.15, side: THREE.DoubleSide,
+  });
+}
+
+function rgbToHex(rgb) {
+  return '#' + rgb.map(v => Math.max(0, Math.min(255, Math.round(v * 255))).toString(16).padStart(2, '0')).join('');
+}
+
+async function parseSTEP(buffer, THREE) {
+  const occt = await loadOcct();
+  const res = occt.ReadStepFile(new Uint8Array(buffer), null);
+  if (!res || !res.success || !res.meshes || !res.meshes.length) {
+    throw new Error('STEP parse failed');
+  }
+  const nodeNames = new Map();
+  (function walk(node, parentName) {
+    if (!node) return;
+    const cur = (node.name && node.name.trim()) || parentName || '';
+    if (Array.isArray(node.meshes)) {
+      for (const mi of node.meshes) {
+        if (!nodeNames.has(mi) && cur) nodeNames.set(mi, cur);
+      }
+    }
+    if (Array.isArray(node.children)) {
+      for (const ch of node.children) walk(ch, cur);
+    }
+  })(res.root, '');
+
+  const group = new THREE.Group();
+  const parts = [];
+  let triangles = 0;
+  let meshIdx = 0;
+  for (let rawIdx = 0; rawIdx < res.meshes.length; rawIdx++) {
+    const m = res.meshes[rawIdx];
+    const posArr = m.attributes && m.attributes.position && (m.attributes.position.array || m.attributes.position);
+    if (!posArr || !posArr.length) continue;
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.Float32BufferAttribute(posArr, 3));
+    const normArr = m.attributes.normal && (m.attributes.normal.array || m.attributes.normal);
+    if (normArr && normArr.length) {
+      geom.setAttribute('normal', new THREE.Float32BufferAttribute(normArr, 3));
+    }
+    const idxArr = m.index && (m.index.array || m.index);
+    let mTris = 0;
+    if (idxArr && idxArr.length) {
+      geom.setIndex(idxArr);
+      mTris = Math.floor(idxArr.length / 3);
+    } else {
+      mTris = Math.floor(posArr.length / 9);
+    }
+    triangles += mTris;
+    if (!geom.attributes.normal) geom.computeVertexNormals();
+    const baseCol = m.color ? normRgb(m.color) : [0.42, 0.71, 1.0];
+    let swatchRgb = baseCol;
+    let origMat;
+    if (m.brep_faces && m.brep_faces.some(f => f.color)) {
+      const firstColored = m.brep_faces.find(f => f.color);
+      if (firstColored && !m.color) swatchRgb = normRgb(firstColored.color);
+      const mats = [];
+      const matMap = new Map();
+      const getMat = (rgb) => {
+        const key = rgb.map(v => Math.round(v * 255)).join(',');
+        if (!matMap.has(key)) {
+          matMap.set(key, mats.length);
+          mats.push(makeMat(THREE, new THREE.Color(rgb[0], rgb[1], rgb[2])));
+        }
+        return matMap.get(key);
+      };
+      for (const f of m.brep_faces) {
+        const mi = getMat(f.color ? normRgb(f.color) : baseCol);
+        geom.addGroup(f.first * 3, (f.last - f.first + 1) * 3, mi);
+      }
+      origMat = mats;
+    } else {
+      origMat = makeMat(THREE, new THREE.Color(baseCol[0], baseCol[1], baseCol[2]));
+    }
+    const pastelNum = PASTEL_PALETTE[meshIdx % PASTEL_PALETTE.length];
+    const pastelMat = makeMat(THREE, pastelNum);
+    const rawName = (m.name && m.name.trim()) || nodeNames.get(rawIdx) || '';
+    const name = '#' + (meshIdx + 1) + (rawName ? ' ' + rawName : ' part');
+    meshIdx++;
+    const mesh = new THREE.Mesh(geom, origMat);
+    mesh.userData = { origMat, pastelMat };
+    group.add(mesh);
+    parts.push({
+      mesh,
+      name,
+      triangles: mTris,
+      origHex: rgbToHex(swatchRgb),
+      pastelHex: '#' + pastelNum.toString(16).padStart(6, '0'),
+    });
+  }
+  if (!group.children.length) throw new Error('empty STEP model');
+  return { object: group, triangles, parts };
+}
+
+function ensureModelCtx(THREE) {
+  if (modelCtx) return modelCtx;
+  const stage = $('modelStage');
+  const canvas = $('modelCanvas');
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setClearColor(0x161b22, 1);
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x30363d, 0.85);
+  scene.add(hemi);
+  const keyLight = new THREE.DirectionalLight(0xffffff, 0.9);
+  keyLight.position.set(1, 2, 1.5);
+  camera.add(keyLight);
+  const fillLight = new THREE.DirectionalLight(0x9ecbff, 0.35);
+  fillLight.position.set(-1.5, -1, 0.5);
+  camera.add(fillLight);
+  scene.add(camera);
+
+  const ctx = {
+    THREE, stage, canvas, renderer, scene, camera,
+    root: null, grid: null, wireframe: false,
+    pastel: localStorage.getItem('modelPastel') === '1',
+    target: new THREE.Vector3(),
+    boundRadius: 1,
+    radius: 3, phi: Math.PI / 3, theta: Math.PI / 4,
+    rafId: 0,
+    updateCamera() {
+      const offset = new THREE.Vector3().setFromSphericalCoords(ctx.radius, ctx.phi, ctx.theta);
+      camera.position.copy(ctx.target).add(offset);
+      camera.lookAt(ctx.target);
+      camera.near = Math.max(ctx.boundRadius * 0.001, ctx.radius * 0.005);
+      camera.far = Math.max(ctx.boundRadius * 20, ctx.radius * 10);
+      camera.updateProjectionMatrix();
+      ctx.requestRender();
+    },
+    resetView() {
+      const visBox = new THREE.Box3();
+      if (ctx.root) {
+        ctx.root.updateMatrixWorld(true);
+        ctx.root.traverse(n => {
+          if (n.isMesh && n.visible) visBox.expandByObject(n);
+        });
+      }
+      if (!visBox.isEmpty()) {
+        const sz = new THREE.Vector3();
+        visBox.getCenter(ctx.target);
+        visBox.getSize(sz);
+        ctx.fitRadius = Math.max(sz.length() * 0.5, 1e-3);
+      } else {
+        ctx.target.set(0, 0, 0);
+        ctx.fitRadius = ctx.boundRadius;
+      }
+      ctx.phi = Math.PI / 3;
+      ctx.theta = Math.PI / 4;
+      const fovRad = (camera.fov * Math.PI) / 180;
+      const aspect = Math.max(0.2, camera.aspect || 1);
+      const r = ctx.fitRadius || ctx.boundRadius;
+      const fitV = r / Math.sin(fovRad / 2);
+      const fitH = r / (Math.sin(fovRad / 2) * Math.min(1, aspect));
+      ctx.radius = Math.max(fitV, fitH) * 1.15;
+      ctx.updateCamera();
+    },
+    panPixels(dx, dy) {
+      const h = canvas.clientHeight || 1;
+      const scale = (2 * ctx.radius * Math.tan((camera.fov * Math.PI) / 360)) / h;
+      const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+      const up = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
+      ctx.target.addScaledVector(right, -dx * scale).addScaledVector(up, dy * scale);
+      ctx.updateCamera();
+    },
+    zoomFactor(k) {
+      const minR = Math.min(ctx.boundRadius, ctx.fitRadius || ctx.boundRadius) * 0.05;
+      ctx.radius = Math.max(minR, Math.min(ctx.boundRadius * 50, ctx.radius * k));
+      ctx.updateCamera();
+    },
+    resize() {
+      const w = stage.clientWidth || 300;
+      const h = stage.clientHeight || 300;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      ctx.requestRender();
+    },
+    requestRender() {
+      if (ctx.rafId) return;
+      ctx.rafId = requestAnimationFrame(() => {
+        ctx.rafId = 0;
+        if ($('modelWrap').style.display !== 'none') {
+          renderer.render(scene, camera);
+        }
+      });
+    },
+    clearModel() {
+      const disposeMat = (mat) => {
+        if (!mat) return;
+        if (Array.isArray(mat)) mat.forEach(m => m.dispose());
+        else mat.dispose();
+      };
+      if (ctx.root) {
+        scene.remove(ctx.root);
+        ctx.root.traverse(n => {
+          if (n.geometry) n.geometry.dispose();
+          disposeMat(n.material);
+          if (n.userData) {
+            disposeMat(n.userData.origMat);
+            disposeMat(n.userData.pastelMat);
+          }
+        });
+        ctx.root = null;
+      }
+      if (ctx.grid) {
+        scene.remove(ctx.grid);
+        if (ctx.grid.geometry) ctx.grid.geometry.dispose();
+        if (ctx.grid.material) ctx.grid.material.dispose();
+        ctx.grid = null;
+      }
+    },
+    setWireframe(on) {
+      ctx.wireframe = on;
+      const applyWf = (mat) => {
+        if (!mat) return;
+        if (Array.isArray(mat)) mat.forEach(m => { m.wireframe = on; });
+        else mat.wireframe = on;
+      };
+      if (ctx.root) {
+        ctx.root.traverse(n => {
+          applyWf(n.material);
+          if (n.userData) {
+            applyWf(n.userData.origMat);
+            applyWf(n.userData.pastelMat);
+          }
+        });
+      }
+      ctx.requestRender();
+    },
+    setPastel(on) {
+      ctx.pastel = on;
+      localStorage.setItem('modelPastel', on ? '1' : '0');
+      if (ctx.root) {
+        ctx.root.traverse(n => {
+          if (n.userData && n.userData.pastelMat) {
+            n.material = on ? n.userData.pastelMat : n.userData.origMat;
+          }
+        });
+      }
+      ctx.setWireframe(ctx.wireframe);
+    },
+  };
+
+  // mouse controls
+  let dragMode = null, lastX = 0, lastY = 0;
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+  canvas.addEventListener('mousedown', e => {
+    dragMode = (e.button === 2 || e.button === 1 || e.shiftKey) ? 'pan' : 'orbit';
+    lastX = e.clientX; lastY = e.clientY;
+  });
+  window.addEventListener('mousemove', e => {
+    if (!dragMode) return;
+    const dx = e.clientX - lastX, dy = e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    if (dragMode === 'orbit') {
+      ctx.theta -= dx * 0.008;
+      ctx.phi = Math.max(0.02, Math.min(Math.PI - 0.02, ctx.phi - dy * 0.008));
+      ctx.updateCamera();
+    } else {
+      ctx.panPixels(dx, dy);
+    }
+  });
+  window.addEventListener('mouseup', () => { dragMode = null; });
+  canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    ctx.zoomFactor(e.deltaY > 0 ? 1.12 : 0.89);
+  }, { passive: false });
+  canvas.addEventListener('dblclick', () => ctx.resetView());
+
+  // touch controls (1-finger orbit, 2-finger pinch zoom + pan)
+  let tState = null;
+  canvas.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) {
+      tState = { mode: 'orbit', x: e.touches[0].clientX, y: e.touches[0].clientY };
+    } else if (e.touches.length === 2) {
+      const x0 = e.touches[0].clientX, y0 = e.touches[0].clientY;
+      const x1 = e.touches[1].clientX, y1 = e.touches[1].clientY;
+      tState = {
+        mode: 'pinch',
+        cx: (x0 + x1) / 2, cy: (y0 + y1) / 2,
+        dist: Math.hypot(x0 - x1, y0 - y1) || 1,
+      };
+    }
+  }, { passive: true });
+  canvas.addEventListener('touchmove', e => {
+    if (!tState) return;
+    e.preventDefault();
+    if (e.touches.length === 1 && tState.mode === 'orbit') {
+      const dx = e.touches[0].clientX - tState.x;
+      const dy = e.touches[0].clientY - tState.y;
+      tState.x = e.touches[0].clientX;
+      tState.y = e.touches[0].clientY;
+      ctx.theta -= dx * 0.009;
+      ctx.phi = Math.max(0.02, Math.min(Math.PI - 0.02, ctx.phi - dy * 0.009));
+      ctx.updateCamera();
+    } else if (e.touches.length === 2 && tState.mode === 'pinch') {
+      const x0 = e.touches[0].clientX, y0 = e.touches[0].clientY;
+      const x1 = e.touches[1].clientX, y1 = e.touches[1].clientY;
+      const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+      const dist = Math.hypot(x0 - x1, y0 - y1) || 1;
+      ctx.panPixels(cx - tState.cx, cy - tState.cy);
+      ctx.zoomFactor(tState.dist / dist);
+      tState.cx = cx; tState.cy = cy; tState.dist = dist;
+    }
+  }, { passive: false });
+  canvas.addEventListener('touchend', e => {
+    if (e.touches.length === 1) {
+      tState = { mode: 'orbit', x: e.touches[0].clientX, y: e.touches[0].clientY };
+    } else if (e.touches.length === 0) {
+      tState = null;
+    }
+  }, { passive: true });
+  canvas.addEventListener('touchcancel', () => { tState = null; }, { passive: true });
+
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => ctx.resize()).observe(stage);
+  } else {
+    window.addEventListener('resize', () => ctx.resize());
+  }
+  modelCtx = ctx;
+  return ctx;
+}
+
+function fmtDim(v) {
+  return v >= 100 ? Math.round(v) : v >= 10 ? v.toFixed(1) : v.toFixed(2);
+}
+
+function renderPartsPanel(parts, ctx) {
+  const box = $('modelParts');
+  if (!parts || !parts.length) {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  box.style.display = '';
+  box.innerHTML =
+    '<div class="mp-head">' +
+      '<span id="mpCount"></span>' +
+      '<button type="button" class="mp-btn" id="mpAll">all</button>' +
+      '<button type="button" class="mp-btn" id="mpNone">none</button>' +
+    '</div>' +
+    '<div class="mp-list" id="mpList"></div>';
+  const list = $('mpList');
+  const rows = [];
+
+  const syncUI = () => {
+    let vis = 0;
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i], r = rows[i];
+      const on = p.mesh.visible;
+      if (on) vis++;
+      r.cb.checked = on;
+      r.row.classList.toggle('off', !on);
+      r.sw.style.background = ctx.pastel ? p.pastelHex : p.origHex;
+    }
+    $('mpCount').textContent = 'parts (' + vis + ' / ' + parts.length + ')';
+    ctx.requestRender();
+  };
+
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    const row = document.createElement('div');
+    row.className = 'mp-row';
+    row.innerHTML =
+      '<input type="checkbox" checked>' +
+      '<span class="mp-swatch"></span>' +
+      '<span class="mp-name">' + escapeHtml(p.name) + '</span>' +
+      '<span class="mp-tris">' + p.triangles.toLocaleString() + '</span>' +
+      '<button type="button" class="mp-btn">only</button>';
+    const cb = row.querySelector('input');
+    const sw = row.querySelector('.mp-swatch');
+    const onlyBtn = row.querySelector('button');
+    row.addEventListener('click', (e) => {
+      if (e.target === onlyBtn) return;
+      if (e.target !== cb) cb.checked = !cb.checked;
+      p.mesh.visible = cb.checked;
+      syncUI();
+    });
+    onlyBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const othersVisible = parts.some((o, idx) => idx !== i && o.mesh.visible);
+      if (p.mesh.visible && !othersVisible) {
+        parts.forEach(o => { o.mesh.visible = true; });
+      } else {
+        parts.forEach((o, idx) => { o.mesh.visible = (idx === i); });
+      }
+      syncUI();
+    });
+    list.appendChild(row);
+    rows.push({ row, cb, sw });
+  }
+
+  $('mpAll').addEventListener('click', () => {
+    parts.forEach(p => { p.mesh.visible = true; });
+    syncUI();
+  });
+  $('mpNone').addEventListener('click', () => {
+    parts.forEach(p => { p.mesh.visible = false; });
+    syncUI();
+  });
+
+  ctx.onPastelChange = syncUI;
+  syncUI();
+}
+
+async function showModel(path, res) {
+  stopModel();
+  const ctrl = new AbortController();
+  modelLoadCtrl = ctrl;
+  $('modelWrap').style.display = '';
+  const status = $('modelStatus');
+  status.textContent = 'loading ' + res.model.toUpperCase() + '…';
+  status.style.display = '';
+  const renderMeta = (extra) => {
+    const meta = $('modelMeta');
+    meta.innerHTML =
+      '<span class="metaText">' + escapeHtml(res.model + ' · ' + fmtSize(res.size) + (extra ? ' · ' + extra : '')) + '</span>' +
+      (res.model === 'step' ? '<button type="button" class="ctrlBtn" id="modelPastelBtn">pastel</button>' : '') +
+      '<button type="button" class="ctrlBtn" id="modelWireBtn">wire</button>' +
+      '<button type="button" class="ctrlBtn" id="modelResetBtn">reset</button>' +
+      '<a class="dlBtn" href="/api/download?path=' + encodeURIComponent(path) + '" download>download</a>';
+    const pb = $('modelPastelBtn'), wb = $('modelWireBtn'), rb = $('modelResetBtn');
+    if (pb) {
+      const isPastel = modelCtx ? modelCtx.pastel : localStorage.getItem('modelPastel') === '1';
+      pb.classList.toggle('active', isPastel);
+      pb.addEventListener('click', () => {
+        const next = !(modelCtx ? modelCtx.pastel : localStorage.getItem('modelPastel') === '1');
+        localStorage.setItem('modelPastel', next ? '1' : '0');
+        if (modelCtx) {
+          modelCtx.setPastel(next);
+          if (modelCtx.onPastelChange) modelCtx.onPastelChange();
+        }
+        pb.classList.toggle('active', next);
+      });
+    }
+    if (wb && modelCtx) {
+      wb.classList.toggle('active', modelCtx.wireframe);
+      wb.addEventListener('click', () => {
+        modelCtx.setWireframe(!modelCtx.wireframe);
+        wb.classList.toggle('active', modelCtx.wireframe);
+      });
+    }
+    if (rb && modelCtx) rb.addEventListener('click', () => modelCtx.resetView());
+  };
+  renderMeta('');
+  try {
+    const src = '/api/raw?path=' + encodeURIComponent(path) + '&v=' + (res.mtime || '');
+    const [THREE, buf] = await Promise.all([
+      loadThree(),
+      fetch(src, { signal: ctrl.signal, credentials: 'same-origin' }).then(r => {
+        if (!r.ok) throw new Error('http ' + r.status);
+        return r.arrayBuffer();
+      }),
+    ]);
+    if (ctrl.signal.aborted) return;
+    if (res.model === 'step') status.textContent = 'tessellating STEP…';
+    const parsed = res.model === 'step'
+      ? await parseSTEP(buf, THREE)
+      : parseSTL(buf, THREE);
+    if (ctrl.signal.aborted) return;
+
+    const ctx = ensureModelCtx(THREE);
+    ctx.clearModel();
+    const obj = parsed.object;
+    const origBox = new THREE.Box3().setFromObject(obj);
+    const origSize = new THREE.Vector3();
+    origBox.getSize(origSize);
+
+    // CAD files are typically Z-up; rotate to Three.js Y-up
+    const holder = new THREE.Group();
+    obj.rotation.x = -Math.PI / 2;
+    holder.add(obj);
+    holder.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(holder);
+    const center = new THREE.Vector3();
+    const size = new THREE.Vector3();
+    box.getCenter(center);
+    box.getSize(size);
+    holder.position.sub(center);
+
+    const maxDim = Math.max(size.x, size.y, size.z, 1e-3);
+    ctx.boundRadius = Math.max(size.length() * 0.5, 1e-3);
+    const gridSize = Math.pow(10, Math.ceil(Math.log10(maxDim * 1.5)));
+    const grid = new THREE.GridHelper(gridSize, 10, 0x30363d, 0x21262d);
+    grid.position.y = -size.y / 2;
+    ctx.scene.add(grid);
+    ctx.grid = grid;
+
+    ctx.scene.add(holder);
+    ctx.root = holder;
+    ctx.pastel = localStorage.getItem('modelPastel') === '1';
+    if (ctx.pastel) ctx.setPastel(true);
+    else if (ctx.wireframe) ctx.setWireframe(true);
+    renderPartsPanel(parsed.parts || null, ctx);
+    ctx.resize();
+    ctx.resetView();
+    status.style.display = 'none';
+    const dims = fmtDim(origSize.x) + '×' + fmtDim(origSize.y) + '×' + fmtDim(origSize.z);
+    renderMeta(parsed.triangles.toLocaleString() + ' tris · ' + dims);
+  } catch (e) {
+    if (ctrl.signal.aborted) return;
+    status.textContent = 'failed to render 3D model';
+  }
+}
+
+function stopModel() {
+  if (modelLoadCtrl) {
+    try { modelLoadCtrl.abort(); } catch (e) {}
+    modelLoadCtrl = null;
+  }
+  const partsBox = $('modelParts');
+  if (partsBox) { partsBox.style.display = 'none'; partsBox.innerHTML = ''; }
+  if (modelCtx) {
+    modelCtx.onPastelChange = null;
+    modelCtx.clearModel();
   }
 }
 
@@ -849,7 +1554,7 @@ $('fontDown').addEventListener('click', () => { fontSize = Math.max(6, fontSize 
 const content = $('content');
 let pinchStart = null;
 content.addEventListener('touchstart', (e) => {
-  if (e.touches.length === 2) {
+  if (e.touches.length === 2 && !(e.target.closest && e.target.closest('#modelStage'))) {
     const dx = e.touches[0].clientX - e.touches[1].clientX;
     const dy = e.touches[0].clientY - e.touches[1].clientY;
     pinchStart = { dist: Math.hypot(dx, dy) || 1, startFs: fontSize };
@@ -1058,6 +1763,8 @@ function showTree() {
   mdSource = null;
   $('mediaWrap').style.display = 'none';
   stopMedia();
+  $('modelWrap').style.display = 'none';
+  stopModel();
   $('imageWrap').style.display = 'none';
   $('imageView').removeAttribute('src');
   $('tailNote').style.display = 'none';
@@ -1243,6 +1950,10 @@ class Handler(BaseHTTPRequestHandler):
                     kind = "video" if ext in VIDEO_MIME else "audio"
                     self._json({"size": size, "mtime": mtime, "media": kind})
                     return
+                if ext in MODEL_MIME:
+                    kind = "stl" if ext == "stl" else "step"
+                    self._json({"size": size, "mtime": mtime, "model": kind})
+                    return
                 if size > TAIL_THRESHOLD and not full:
                     partial = size > TAIL_MAX_FILE_BYTES
                     with p.open("rb") as fh:
@@ -1302,7 +2013,7 @@ class Handler(BaseHTTPRequestHandler):
                 # anything else: stream the exact bytes (media inline,
                 # unknown types as octet-stream so browsers download them)
                 ctype = (VIDEO_MIME.get(ext) or AUDIO_MIME.get(ext)
-                         or "application/octet-stream")
+                         or MODEL_MIME.get(ext) or "application/octet-stream")
                 self._stream_file(p, ctype)
             except Exception:
                 self._send(400, b"bad path", "text/plain")
