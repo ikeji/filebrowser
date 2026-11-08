@@ -561,10 +561,14 @@ function langFor(name) {
 }
 
 let watchCtrl = null;
+let watchPollCtrl = null;
+let watchWoken = false;
+let currentMtime = null;
 
 async function openFile(path, opts) {
   opts = opts || {};
   const { jumpLine, fromHistory, preserveScroll, full } = opts;
+  const isReload = !!preserveScroll && currentPath === path;
   currentPath = path;
   currentFull = !!full;
   $('title').firstElementChild.textContent = path;
@@ -584,9 +588,11 @@ async function openFile(path, opts) {
     $('viewTabs').classList.remove('show');
     $('mdWrap').style.display = 'none';
     $('mediaWrap').style.display = 'none';
-    $('modelWrap').style.display = 'none';
+    if (!res.model) {
+      $('modelWrap').style.display = 'none';
+      stopModel();
+    }
     stopMedia();
-    stopModel();
     mdSource = null;
     const savedScroll = preserveScroll ? $('content').scrollTop : null;
     const tailNote = $('tailNote');
@@ -607,7 +613,7 @@ async function openFile(path, opts) {
       imageWrap.style.display = 'none';
       imageView.removeAttribute('src');
       tailNote.style.display = 'none';
-      showModel(path, res);
+      showModel(path, res, { preserveView: isReload });
     } else if (res.media || res.binary) {
       wrap.style.display = 'none';
       imageWrap.style.display = 'none';
@@ -652,9 +658,15 @@ async function openFile(path, opts) {
       if (lastEl) lastEl.scrollIntoView({ block: 'end' });
       else $('content').scrollTop = 0;
     } else $('content').scrollTop = 0;
+    currentMtime = res.mtime || null;
     if (res.mtime) startWatch(path, res.mtime);
+    return true;
   } catch (e) {
     toast('failed to load ' + path);
+    if (currentPath === path && currentMtime && !watchCtrl) {
+      startWatch(path, currentMtime);
+    }
+    return false;
   }
 }
 
@@ -924,7 +936,7 @@ function ensureModelCtx(THREE) {
 
   const ctx = {
     THREE, stage, canvas, renderer, scene, camera,
-    root: null, grid: null, wireframe: false,
+    root: null, grid: null, parts: null, modelPath: null, wireframe: false,
     pastel: localStorage.getItem('modelPastel') === '1',
     target: new THREE.Vector3(),
     boundRadius: 1,
@@ -987,6 +999,15 @@ function ensureModelCtx(THREE) {
       camera.updateProjectionMatrix();
       ctx.requestRender();
     },
+    renderNow() {
+      if (ctx.rafId) {
+        cancelAnimationFrame(ctx.rafId);
+        ctx.rafId = 0;
+      }
+      if ($('modelWrap').style.display !== 'none') {
+        renderer.render(scene, camera);
+      }
+    },
     requestRender() {
       if (ctx.rafId) return;
       ctx.rafId = requestAnimationFrame(() => {
@@ -1020,6 +1041,8 @@ function ensureModelCtx(THREE) {
         if (ctx.grid.material) ctx.grid.material.dispose();
         ctx.grid = null;
       }
+      ctx.parts = null;
+      ctx.modelPath = null;
     },
     setWireframe(on) {
       ctx.wireframe = on;
@@ -1215,8 +1238,17 @@ function renderPartsPanel(parts, ctx) {
   syncUI();
 }
 
-async function showModel(path, res) {
-  stopModel();
+async function showModel(path, res, opts) {
+  opts = opts || {};
+  const keepView = !!(opts.preserveView && modelCtx && modelCtx.modelPath === path && modelCtx.root);
+  if (keepView) {
+    if (modelLoadCtrl) {
+      try { modelLoadCtrl.abort(); } catch (e) {}
+      modelLoadCtrl = null;
+    }
+  } else {
+    stopModel();
+  }
   const ctrl = new AbortController();
   modelLoadCtrl = ctrl;
   $('modelWrap').style.display = '';
@@ -1254,7 +1286,7 @@ async function showModel(path, res) {
     }
     if (rb && modelCtx) rb.addEventListener('click', () => modelCtx.resetView());
   };
-  renderMeta('');
+  if (!keepView) renderMeta('');
   try {
     const src = '/api/raw?path=' + encodeURIComponent(path) + '&v=' + (res.mtime || '');
     const [THREE, buf] = await Promise.all([
@@ -1272,6 +1304,26 @@ async function showModel(path, res) {
     if (ctrl.signal.aborted) return;
 
     const ctx = ensureModelCtx(THREE);
+    let savedView = null;
+    if (keepView && ctx.modelPath === path && ctx.root) {
+      const visByName = new Map();
+      const visByIdx = [];
+      if (ctx.parts) {
+        for (let i = 0; i < ctx.parts.length; i++) {
+          const p = ctx.parts[i];
+          visByName.set(p.name, p.mesh.visible);
+          visByIdx.push(p.mesh.visible);
+        }
+      }
+      savedView = {
+        target: ctx.target.clone(),
+        radius: ctx.radius,
+        phi: ctx.phi,
+        theta: ctx.theta,
+        visByName,
+        visByIdx,
+      };
+    }
     ctx.clearModel();
     const obj = parsed.object;
     const origBox = new THREE.Box3().setFromObject(obj);
@@ -1300,17 +1352,45 @@ async function showModel(path, res) {
 
     ctx.scene.add(holder);
     ctx.root = holder;
+    ctx.parts = parsed.parts || null;
+    ctx.modelPath = path;
+    if (savedView && ctx.parts) {
+      for (let i = 0; i < ctx.parts.length; i++) {
+        const p = ctx.parts[i];
+        if (savedView.visByName.has(p.name)) {
+          p.mesh.visible = savedView.visByName.get(p.name);
+        } else if (i < savedView.visByIdx.length) {
+          p.mesh.visible = savedView.visByIdx[i];
+        }
+      }
+    }
     ctx.pastel = localStorage.getItem('modelPastel') === '1';
     if (ctx.pastel) ctx.setPastel(true);
     else if (ctx.wireframe) ctx.setWireframe(true);
-    renderPartsPanel(parsed.parts || null, ctx);
+    renderPartsPanel(ctx.parts, ctx);
     ctx.resize();
-    ctx.resetView();
+    if (savedView) {
+      ctx.target.copy(savedView.target);
+      ctx.radius = savedView.radius;
+      ctx.phi = savedView.phi;
+      ctx.theta = savedView.theta;
+      ctx.updateCamera();
+    } else {
+      ctx.resetView();
+    }
     status.style.display = 'none';
     const dims = fmtDim(origSize.x) + '×' + fmtDim(origSize.y) + '×' + fmtDim(origSize.z);
     renderMeta(parsed.triangles.toLocaleString() + ' tris · ' + dims);
+    ctx.renderNow();
   } catch (e) {
     if (ctrl.signal.aborted) return;
+    if (!opts.retried) {
+      await new Promise(r => setTimeout(r, 400));
+      if (!ctrl.signal.aborted && currentPath === path) {
+        return showModel(path, res, { preserveView: opts.preserveView, retried: true });
+      }
+      return;
+    }
     status.textContent = 'failed to render 3D model';
   }
 }
@@ -1339,8 +1419,31 @@ function setTailNote(msg, btnLabel, onClick) {
 }
 
 function cancelWatch() {
+  if (watchPollCtrl) { try { watchPollCtrl.abort(); } catch (e) {} watchPollCtrl = null; }
   if (watchCtrl) { try { watchCtrl.abort(); } catch (e) {} watchCtrl = null; }
 }
+
+function wakeWatch() {
+  if (modelCtx && $('modelWrap').style.display !== 'none') {
+    modelCtx.resize();
+    modelCtx.renderNow();
+  }
+  if (!currentPath) return;
+  if (!watchCtrl || watchCtrl.signal.aborted) {
+    if (currentMtime) startWatch(currentPath, currentMtime);
+    return;
+  }
+  if (watchPollCtrl) {
+    watchWoken = true;
+    try { watchPollCtrl.abort(); } catch (e) {}
+  }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') wakeWatch();
+});
+window.addEventListener('focus', wakeWatch);
+window.addEventListener('online', wakeWatch);
+window.addEventListener('pageshow', wakeWatch);
 
 async function startWatch(path, mtime) {
   cancelWatch();
@@ -1348,11 +1451,18 @@ async function startWatch(path, mtime) {
   watchCtrl = ctrl;
   let curMtime = mtime;
   while (currentPath === path && !ctrl.signal.aborted) {
+    const pollCtrl = new AbortController();
+    watchPollCtrl = pollCtrl;
+    const onAbort = () => { try { pollCtrl.abort(); } catch (e) {} };
+    ctrl.signal.addEventListener('abort', onAbort, { once: true });
+    const timer = setTimeout(onAbort, 35000);
     try {
       const u = new URL('/api/watch', location.origin);
       u.searchParams.set('path', path);
       u.searchParams.set('mtime', curMtime);
-      const r = await fetch(u, { signal: ctrl.signal, credentials: 'same-origin' });
+      const r = await fetch(u, { signal: pollCtrl.signal, credentials: 'same-origin' });
+      clearTimeout(timer);
+      ctrl.signal.removeEventListener('abort', onAbort);
       if (ctrl.signal.aborted || currentPath !== path) return;
       if (r.status === 204) continue;
       if (!r.ok) {
@@ -1360,14 +1470,26 @@ async function startWatch(path, mtime) {
         continue;
       }
       const data = await r.json();
-      if (data.deleted) { toast('file deleted'); return; }
+      if (data.deleted) {
+        toast('file deleted');
+        curMtime = 'deleted';
+        await new Promise(res => setTimeout(res, 1000));
+        continue;
+      }
       if (data.changed) {
         toast('reloading…');
-        await openFile(path, { fromHistory: true, preserveScroll: true, full: currentFull });
-        return; // openFile starts a new watch
+        const ok = await openFile(path, { fromHistory: true, preserveScroll: true, full: currentFull });
+        if (ok) return; // openFile starts a new watch
+        await new Promise(res => setTimeout(res, 2000));
       }
     } catch (e) {
-      if (ctrl.signal.aborted) return;
+      clearTimeout(timer);
+      ctrl.signal.removeEventListener('abort', onAbort);
+      if (ctrl.signal.aborted || currentPath !== path) return;
+      if (watchWoken) {
+        watchWoken = false;
+        continue;
+      }
       await new Promise(res => setTimeout(res, 2000));
     }
   }
@@ -1940,7 +2062,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(404, b"not found", "text/plain"); return
                 st = p.stat()
                 size = st.st_size
-                mtime = str(st.st_mtime_ns)
+                mtime = f"{st.st_mtime_ns}-{size}"
                 ext = p.suffix.lower().lstrip(".")
                 if ext in IMAGE_MIME:
                     self._json({"size": size, "mtime": mtime, "image": True,
@@ -2037,15 +2159,43 @@ class Handler(BaseHTTPRequestHandler):
                 p = safe_path(rel)
             except Exception:
                 self._send(400, b"bad path", "text/plain"); return
+            has_size = "-" in old or old == "deleted"
             deadline = time.monotonic() + 30.0
             while time.monotonic() < deadline:
                 try:
                     st = p.stat()
-                    cur = str(st.st_mtime_ns)
+                    cur = f"{st.st_mtime_ns}-{st.st_size}" if has_size else str(st.st_mtime_ns)
                     if cur != old:
+                        # Wait briefly for non-atomic writes (truncate + multi-chunk write) to settle
+                        settle_end = time.monotonic() + 1.0
+                        prev_sig = (st.st_mtime_ns, st.st_size)
+                        while time.monotonic() < settle_end:
+                            time.sleep(0.05)
+                            try:
+                                st2 = p.stat()
+                            except OSError:
+                                break
+                            sig = (st2.st_mtime_ns, st2.st_size)
+                            if st2.st_size > 0 and sig == prev_sig:
+                                st = st2
+                                break
+                            prev_sig = sig
+                            st = st2
+                        cur = f"{st.st_mtime_ns}-{st.st_size}" if has_size else str(st.st_mtime_ns)
                         self._json({"changed": True, "mtime": cur}); return
                 except FileNotFoundError:
-                    self._json({"changed": True, "deleted": True}); return
+                    if old != "deleted":
+                        # Wait briefly in case file is being replaced via unlink + create
+                        reappear_end = time.monotonic() + 0.5
+                        reappeared = False
+                        while time.monotonic() < reappear_end:
+                            time.sleep(0.05)
+                            if p.exists():
+                                reappeared = True
+                                break
+                        if not reappeared:
+                            self._json({"changed": True, "deleted": True}); return
+                        continue
                 except OSError:
                     pass
                 time.sleep(0.5)
